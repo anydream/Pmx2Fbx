@@ -1,0 +1,1089 @@
+
+#ifndef __PmxReader_h__
+#define __PmxReader_h__
+
+#include <map>
+#include <unordered_map>
+#include "BinReader.h"
+
+class PmxReader
+{
+public:
+	struct Vector2
+	{
+		float	X, Y;
+
+		Vector2()
+			: X(0), Y(0)
+		{}
+
+		Vector2(float x, float y)
+			: X(x), Y(y)
+		{}
+
+		void Read(BinReader & reader)
+		{
+			X = reader.Read<float>();
+			Y = reader.Read<float>();
+		}
+	};
+
+	struct Vector3 : Vector2
+	{
+		float	Z;
+
+		Vector3()
+			: Z(0)
+		{}
+
+		Vector3(float x, float y, float z)
+			: Vector2(x, y), Z(z)
+		{}
+
+		void Read(BinReader & reader)
+		{
+			Vector2::Read(reader);
+			Z = reader.Read<float>();
+		}
+
+		Vector3 Mul(float v) const
+		{
+			return Vector3(X * v, Y * v, Z * v);
+		}
+
+		Vector3 Sub(const Vector3 & other) const
+		{
+			return Vector3(X - other.X, Y - other.Y, Z - other.Z);
+		}
+
+		Vector3 Add(const Vector3 & other) const
+		{
+			return Vector3(X + other.X, Y + other.Y, Z + other.Z);
+		}
+
+		float Length() const
+		{
+			return sqrt(X * X + Y * Y + Z * Z);
+		}
+
+		float Normalize()
+		{
+			float len = Length();
+
+			if (len != 0)
+			{
+				float invLen = 1 / len;
+
+				X *= invLen;
+				Y *= invLen;
+				Z *= invLen;
+			}
+
+			return len;
+		}
+
+		static Vector3 Cross(const Vector3 & left, const Vector3 & right)
+		{
+			return Vector3(
+				(left.Y * right.Z) - (right.Y * left.Z),
+				(right.X * left.Z) - (left.X * right.Z),
+				(left.X * right.Y) - (right.X * left.Y));
+		}
+	};
+
+	struct Vector4 : Vector3
+	{
+		float	W;
+
+		Vector4()
+			: W(0)
+		{}
+
+		void Read(BinReader & reader)
+		{
+			Vector3::Read(reader);
+			W = reader.Read<float>();
+		}
+	};
+
+	struct DeformType
+	{
+		enum Type
+		{
+			BDEF1,
+			BDEF2,
+			BDEF4,
+			SDEF,
+			QDEF
+		};
+	};
+
+	struct BoneWeight
+	{
+		int		Bone;
+		float	Value;
+
+		BoneWeight()
+			: Bone(-1), Value(0)
+		{}
+	};
+
+	struct PmxVertex
+	{
+		Vector3				Position, Normal, C0, R0, R1, RW0, RW1;
+		Vector2				UV;
+		Vector4				UVA[4];
+		DeformType::Type	Deform;
+		bool				bSDEF;
+		BoneWeight			Weight[4];
+		float				EdgeScale;
+
+		PmxVertex()
+		{
+			Deform = DeformType::BDEF1;
+			bSDEF = false;
+			EdgeScale = 1;
+		}
+
+		void ReadVertex(BinReader & reader, int UVACount, int BoneSize)
+		{
+			Position.Read(reader);
+			Normal.Read(reader);
+			UV.Read(reader);
+
+			for (int i = 0; i < UVACount && i < 4; ++i)
+			{
+				UVA[i].Read(reader);
+			}
+
+			Deform = (DeformType::Type)reader.Read<uint8_t>();
+			bSDEF = false;
+
+			switch (Deform)
+			{
+			case DeformType::BDEF1:
+				Weight[0].Bone = ReadElement_Int32(reader, BoneSize, true);
+				Weight[0].Value = 1;
+				break;
+
+			case DeformType::BDEF2:
+				Weight[0].Bone = ReadElement_Int32(reader, BoneSize, true);
+				Weight[1].Bone = ReadElement_Int32(reader, BoneSize, true);
+				Weight[0].Value = reader.Read<float>();
+				Weight[1].Value = 1 - Weight[0].Value;
+				break;
+
+			case DeformType::BDEF4:
+			case DeformType::QDEF:
+				Weight[0].Bone = ReadElement_Int32(reader, BoneSize, true);
+				Weight[1].Bone = ReadElement_Int32(reader, BoneSize, true);
+				Weight[2].Bone = ReadElement_Int32(reader, BoneSize, true);
+				Weight[3].Bone = ReadElement_Int32(reader, BoneSize, true);
+				Weight[0].Value = reader.Read<float>();
+				Weight[1].Value = reader.Read<float>();
+				Weight[2].Value = reader.Read<float>();
+				Weight[3].Value = reader.Read<float>();
+				break;
+
+			case DeformType::SDEF:
+				Weight[0].Bone = ReadElement_Int32(reader, BoneSize, true);
+				Weight[1].Bone = ReadElement_Int32(reader, BoneSize, true);
+				Weight[0].Value = reader.Read<float>();
+				Weight[1].Value = 1 - Weight[0].Value;
+				C0.Read(reader);
+				R0.Read(reader);
+				R1.Read(reader);
+				CalcSDEF_RW();
+				bSDEF = true;
+				break;
+			}
+			EdgeScale = reader.Read<float>();
+		}
+
+		void CalcSDEF_RW()
+		{
+			Vector3 vector = (R0.Mul(Weight[0].Value)).Add(R1.Mul(Weight[1].Value));
+			RW0 = R0.Sub(vector);
+			RW1 = R1.Sub(vector);
+		}
+	};
+
+	struct MaterialFlags
+	{
+		enum Type
+		{
+			DrawBoth = 1,
+			Edge = 0x10,
+			LineDraw = 0x80,
+			None = 0,
+			PointDraw = 0x40,
+			SelfShadow = 8,
+			SelfShadowMap = 4,
+			Shadow = 2,
+			VertexColor = 0x20
+		};
+	};
+
+	struct SphereModeType
+	{
+		enum Type
+		{
+			None,
+			Mul,
+			Add,
+			SubTex
+		};
+	};
+
+	struct PmxMaterial
+	{
+		std::string				Name, NameE, Tex, Sphere, Toon, Memo;
+		Vector4					Diffuse, EdgeColor;
+		Vector3					Specular, Ambient;
+		float					Power, EdgeSize;
+		MaterialFlags::Type		Flags;
+		SphereModeType::Type	SphereMode;
+		int						FaceCount;
+
+		PmxMaterial()
+		{
+			Power = 0;
+			EdgeSize = 1;
+			FaceCount = 0;
+			Flags = MaterialFlags::None;
+			SphereMode = SphereModeType::None;
+		}
+
+		void ReadMaterial(BinReader & reader, PmxReader * owner)
+		{
+			owner->ReadString(Name);
+			owner->ReadString(NameE);
+			Diffuse.Read(reader);
+			Specular.Read(reader);
+			Power = reader.Read<float>();
+			Ambient.Read(reader);
+			Flags = (MaterialFlags::Type)reader.Read<uint8_t>();
+			EdgeColor.Read(reader);
+			EdgeSize = reader.Read<float>();
+			Tex = owner->IndexToName[ReadElement_Int32(reader, owner->TexSize, true)];
+			Sphere = owner->IndexToName[ReadElement_Int32(reader, owner->TexSize, true)];
+			SphereMode = (SphereModeType::Type)reader.Read<uint8_t>();
+
+			if (reader.Read<uint8_t>() == 0)
+			{
+				Toon = owner->IndexToName[ReadElement_Int32(reader, owner->TexSize, true)];
+			}
+			else
+			{
+				int n = reader.Read<uint8_t>();
+				Toon = GetToonName(n);
+			}
+			owner->ReadString(Memo);
+			//UpdateAttributeFromMemo();
+			FaceCount = ReadElement_Int32(reader, 4, true);
+		}
+
+		static inline std::string ToString(int val)
+		{
+			char buf[2 * _MAX_INT_DIG];
+			sprintf_s(buf, sizeof(buf), "%d", val);
+			return std::string(buf);
+		}
+
+		static std::string GetToonName(int n)
+		{
+			if (n < 0)
+			{
+				return "toon0.bmp";
+			}
+			int num = n + 1;
+			return ("toon" + ToString(num) + ".bmp");
+		}
+	};
+
+	struct BoneFlags
+	{
+		enum Type
+		{
+			AfterPhysics = 0x1000,
+			AppendLocal = 0x80,
+			AppendRotation = 0x100,
+			AppendTranslation = 0x200,
+			Enable = 0x10,
+			ExtParent = 0x2000,
+			FixAxis = 0x400,
+			IK = 0x20,
+			LocalFrame = 0x800,
+			None = 0,
+			Rotation = 2,
+			ToBone = 1,
+			Translation = 4,
+			Visible = 8
+		};
+	};
+
+	struct IKLink
+	{
+		int		Bone;
+		bool	IsLimit;
+		Vector3	Low, High;
+
+		IKLink()
+		{
+			Bone = -1;
+			IsLimit = false;
+		}
+
+		void ReadLink(BinReader & reader, PmxReader * owner)
+		{
+			Bone = ReadElement_Int32(reader, owner->BoneSize, true);
+			IsLimit = reader.Read<uint8_t>() != 0;
+			if (IsLimit)
+			{
+				Low.Read(reader);
+				High.Read(reader);
+			}
+		}
+	};
+
+	struct PmxIK
+	{
+		int					Target, LoopCount;
+		float				Angle;
+		std::vector<IKLink>	LinkList;
+
+		PmxIK()
+		{
+			Target = -1;
+			LoopCount = 0;
+			Angle = 1;
+		}
+
+		void ReadIK(BinReader & reader, PmxReader * owner)
+		{
+			Target = ReadElement_Int32(reader, owner->BoneSize, true);
+			LoopCount = ReadElement_Int32(reader, 4, true);
+			Angle = reader.Read<float>();
+
+			int num = ReadElement_Int32(reader, 4, true);
+			LinkList.resize(num);
+
+			for (std::vector<IKLink>::iterator it = LinkList.begin(), end = LinkList.end();
+				it != end;
+				++it)
+			{
+				it->ReadLink(reader, owner);
+			}
+		}
+	};
+
+	struct PmxBone
+	{
+		std::string		Name, NameE;
+		Vector3			Position, To_Offset, Axis, LocalX, LocalY, LocalZ;
+		int				Parent, Level, To_Bone, AppendParent, ExtKey;
+		float			AppendRatio;
+		BoneFlags::Type	Flags;
+		PmxIK			IK;
+
+		PmxBone()
+		{
+			Parent = -1;
+			To_Bone = -1;
+			AppendParent = -1;
+			AppendRatio = 1;
+			Level = 0;
+			ExtKey = 0;
+			Flags = (BoneFlags::Type)(BoneFlags::Enable | BoneFlags::Visible | BoneFlags::Rotation);
+			LocalX.X = 1;
+			LocalY.Y = 1;
+			LocalZ.Z = 1;
+		}
+
+		void ReadBone(BinReader & reader, PmxReader * owner)
+		{
+			owner->ReadString(Name);
+			owner->ReadString(NameE);
+			Position.Read(reader);
+			Parent = ReadElement_Int32(reader, owner->BoneSize, true);
+			Level = ReadElement_Int32(reader, 4, true);
+			Flags = (BoneFlags::Type)ReadElement_Int32(reader, 2, false);
+			if (GetFlag(BoneFlags::ToBone))
+			{
+				To_Bone = ReadElement_Int32(reader, owner->BoneSize, true);
+			}
+			else
+			{
+				To_Offset.Read(reader);
+			}
+			if (GetFlag(BoneFlags::AppendRotation) || GetFlag(BoneFlags::AppendTranslation))
+			{
+				AppendParent = ReadElement_Int32(reader, owner->BoneSize, true);
+				AppendRatio = reader.Read<float>();
+			}
+			if (GetFlag(BoneFlags::FixAxis))
+			{
+				Axis.Read(reader);
+			}
+			if (GetFlag(BoneFlags::LocalFrame))
+			{
+				LocalX.Read(reader);
+				LocalZ.Read(reader);
+				NormalizeLocal();
+			}
+			if (GetFlag(BoneFlags::ExtParent))
+			{
+				ExtKey = ReadElement_Int32(reader, 4, true);
+			}
+			if (GetFlag(BoneFlags::IK))
+			{
+				IK.ReadIK(reader, owner);
+			}
+		}
+
+		bool GetFlag(BoneFlags::Type f)
+		{
+			return ((f & Flags) == f);
+		}
+
+		void NormalizeLocal()
+		{
+			LocalZ.Normalize();
+			LocalX.Normalize();
+			LocalY = Vector3::Cross(LocalZ, LocalX);
+			LocalZ = Vector3::Cross(LocalX, LocalY);
+			LocalY.Normalize();
+			LocalZ.Normalize();
+		}
+	};
+
+	struct PmxBaseMorph
+	{
+
+	};
+
+	struct PmxGroupMorph : PmxBaseMorph
+	{
+		int		Index;
+		float	Ratio;
+
+		PmxGroupMorph()
+		{
+			Index = -1;
+			Ratio = 1;
+		}
+
+		void Read(BinReader & reader, PmxReader * owner)
+		{
+			Index = ReadElement_Int32(reader, owner->MorphSize, true);
+			Ratio = reader.Read<float>();
+		}
+	};
+
+	struct PmxVertexMorph : PmxBaseMorph
+	{
+		int		Index;
+		Vector3	Offset;
+
+		PmxVertexMorph()
+		{
+			Index = -1;
+		}
+
+		void Read(BinReader & reader, PmxReader * owner)
+		{
+			Index = ReadElement_Int32(reader, owner->VertexSize, false);
+			Offset.Read(reader);
+		}
+	};
+
+	struct PmxBoneMorph : PmxBaseMorph
+	{
+		int		Index;
+		Vector3	Translation;
+		Vector4	Rotaion;
+
+		PmxBoneMorph()
+		{
+			Index = -1;
+		}
+
+		void Read(BinReader & reader, PmxReader * owner)
+		{
+			Index = ReadElement_Int32(reader, owner->BoneSize, true);
+			Translation.Read(reader);
+			Rotaion.Read(reader);
+		}
+	};
+
+	struct PmxUVMorph : PmxBaseMorph
+	{
+		int		Index;
+		Vector4	Offset;
+
+		PmxUVMorph()
+		{
+			Index = -1;
+		}
+
+		void Read(BinReader & reader, PmxReader * owner)
+		{
+			Index = ReadElement_Int32(reader, owner->VertexSize, false);
+			Offset.Read(reader);
+		}
+	};
+
+	struct MorphData
+	{
+		Vector4	Diffuse;
+		Vector4	Specular;
+		Vector3	Ambient;
+		float	EdgeSize;
+		Vector4	EdgeColor;
+		Vector4	Tex;
+		Vector4	Sphere;
+		Vector4	Toon;
+
+		MorphData()
+		{
+			EdgeSize = 1;
+		}
+	};
+
+	struct OpType
+	{
+		enum Type
+		{
+			Mul,
+			Add
+		};
+	};
+
+	struct PmxMaterialMorph : PmxBaseMorph
+	{
+		int				Index;
+		OpType::Type	Op;
+		MorphData		Data;
+
+		void Read(BinReader & reader, PmxReader * owner)
+		{
+			Index = ReadElement_Int32(reader, owner->MaterialSize, true);
+			Op = (OpType::Type)reader.Read<uint8_t>();
+			Data.Diffuse.Read(reader);
+			Data.Specular.Read(reader);
+			Data.Ambient.Read(reader);
+			Data.EdgeColor.Read(reader);
+			Data.EdgeSize = reader.Read<float>();
+			Data.Tex.Read(reader);
+			Data.Sphere.Read(reader);
+			Data.Toon.Read(reader);
+		}
+	};
+
+	struct PmxImpulseMorph : PmxBaseMorph
+	{
+		int		Index;
+		bool	Local;
+		Vector3	Torque;
+		Vector3	Velocity;
+
+		PmxImpulseMorph()
+		{
+			Index = -1;
+			Local = false;
+		}
+
+		void Read(BinReader & reader, PmxReader * owner)
+		{
+			Index = ReadElement_Int32(reader, owner->BodySize, true);
+			Local = reader.Read<uint8_t>() != 0;
+			Velocity.Read(reader);
+			Torque.Read(reader);
+		}
+	};
+
+	struct OffsetKind
+	{
+		enum Type
+		{
+			Group,
+			Vertex,
+			Bone,
+			UV,
+			UVA1,
+			UVA2,
+			UVA3,
+			UVA4,
+			Material,
+			Flip,
+			Impulse
+		};
+	};
+
+	struct PmxMorph
+	{
+		std::string					Name, NameE;
+		int							Panel;
+		OffsetKind::Type			Kind;
+		std::vector<PmxBaseMorph*>	OffsetList;
+
+		PmxMorph()
+		{
+			Panel = 4;
+			Kind = OffsetKind::Vertex;
+		}
+
+		~PmxMorph()
+		{
+			for (std::vector<PmxBaseMorph*>::iterator it = OffsetList.begin(), end = OffsetList.end();
+				it != end;
+				++it)
+			{
+				delete *it;
+			}
+		}
+
+		void ReadMorph(BinReader & reader, PmxReader * owner)
+		{
+			owner->ReadString(Name);
+			owner->ReadString(NameE);
+			Panel = ReadElement_Int32(reader, 1, true);
+			Kind = (OffsetKind::Type)ReadElement_Int32(reader, 1, true);
+
+			int num = ReadElement_Int32(reader, 4, true);
+			for (int i = 0; i < num; ++i)
+			{
+				switch (Kind)
+				{
+				case OffsetKind::Group:
+				case OffsetKind::Flip:
+				{
+					PmxGroupMorph * pMorph = new PmxGroupMorph;
+					pMorph->Read(reader, owner);
+					OffsetList.push_back(pMorph);
+					break;
+				}
+				case OffsetKind::Vertex:
+				{
+					PmxVertexMorph * pMorph = new PmxVertexMorph;
+					pMorph->Read(reader, owner);
+					OffsetList.push_back(pMorph);
+					break;
+				}
+				case OffsetKind::Bone:
+				{
+					PmxBoneMorph * pMorph = new PmxBoneMorph;
+					pMorph->Read(reader, owner);
+					OffsetList.push_back(pMorph);
+					break;
+				}
+				case OffsetKind::UV:
+				case OffsetKind::UVA1:
+				case OffsetKind::UVA2:
+				case OffsetKind::UVA3:
+				case OffsetKind::UVA4:
+				{
+					PmxUVMorph * pMorph = new PmxUVMorph;
+					pMorph->Read(reader, owner);
+					OffsetList.push_back(pMorph);
+					break;
+				}
+				case OffsetKind::Material:
+				{
+					PmxMaterialMorph * pMorph = new PmxMaterialMorph;
+					pMorph->Read(reader, owner);
+					OffsetList.push_back(pMorph);
+					break;
+				}
+				case OffsetKind::Impulse:
+				{
+					PmxImpulseMorph * pMorph = new PmxImpulseMorph;
+					pMorph->Read(reader, owner);
+					OffsetList.push_back(pMorph);
+					break;
+				}
+				}
+			}
+		}
+	};
+
+	struct ElementType
+	{
+		enum Type
+		{
+			Bone,
+			Morph
+		};
+	};
+
+	struct NodeElement
+	{
+		ElementType::Type	EleType;
+		int					Index;
+
+		void Read(BinReader & reader, PmxReader * owner)
+		{
+			EleType = (ElementType::Type)reader.Read<uint8_t>();
+			switch (EleType)
+			{
+			case ElementType::Bone:
+				Index = ReadElement_Int32(reader, owner->BoneSize, true);
+				return;
+
+			case ElementType::Morph:
+				Index = ReadElement_Int32(reader, owner->MorphSize, true);
+				return;
+			}
+		}
+	};
+
+	struct PmxNode
+	{
+		std::string					Name, NameE;
+		bool						SystemNode;
+		std::vector<NodeElement>	ElementList;
+
+		void ReadNode(BinReader & reader, PmxReader * owner)
+		{
+			owner->ReadString(Name);
+			owner->ReadString(NameE);
+			SystemNode = reader.Read<uint8_t>() != 0;
+
+			int num = ReadElement_Int32(reader, 4, true);
+			ElementList.resize(num);
+
+			for (std::vector<NodeElement>::iterator it = ElementList.begin(), end = ElementList.end();
+				it != end;
+				++it)
+			{
+				it->Read(reader, owner);
+			}
+		}
+	};
+
+public:
+	PmxReader(const void * pBuffer, size_t len)
+		: m_Reader(pBuffer, len)
+	{
+		ReadHeader();
+		ReadModelInfo();
+		ReadVertexInfo();
+		ReadFaceInfo();
+		ReadTextureInfo();
+		ReadMaterialInfo();
+		ReadBoneInfo();
+		ReadMorphInfo();
+		ReadNodeInfo();
+	}
+
+private:
+	void ReadHeader()
+	{
+		static std::string PmxKey_v1 = "Pmx ";
+		static std::string PmxKey = "PMX ";
+
+		std::string strMagic;
+		m_Reader.ReadString(4, strMagic);
+		if (strMagic == PmxKey_v1)
+		{
+			Ver = 1;
+			m_Reader.Skip(4);
+		}
+		else
+		{
+			if (strMagic != PmxKey)
+			{
+				throw std::wstring(L"文件头错误");
+			}
+
+			Ver = m_Reader.Read<float>();
+		}
+
+		if (Ver > 2.1f)
+		{
+			throw std::wstring(L"不支持大于 2.1 版本的文件");
+		}
+
+		ReadElementFormat();
+	}
+
+	void ReadElementFormat()
+	{
+		int szRead = ReadElement_Int32(m_Reader, 1, true);
+		BinReader::Data buffer;
+		m_Reader.ReadData(szRead, buffer);
+
+		int num2 = 0;
+		if (Ver <= 1)
+		{
+			VertexSize = buffer[num2++];
+			BoneSize = buffer[num2++];
+			MorphSize = buffer[num2++];
+			MaterialSize = buffer[num2++];
+			BodySize = buffer[num2++];
+		}
+		else
+		{
+			StringEnc = (StringEncType::Type)buffer[num2++];
+			UVACount = buffer[num2++];
+			VertexSize = buffer[num2++];
+			TexSize = buffer[num2++];
+			MaterialSize = buffer[num2++];
+			BoneSize = buffer[num2++];
+			MorphSize = buffer[num2++];
+			BodySize = buffer[num2++];
+		}
+	}
+
+	void ReadString(std::string & str)
+	{
+		if (Ver <= 1)
+		{
+			ReadString_v1(str);
+			return;
+		}
+
+		if (StringEnc == StringEncType::UTF8)
+		{
+			ReadString_v1(str);
+			return;
+		}
+		return ReadString_v2(str);
+	}
+
+	void ReadString_v1(std::string & str)
+	{
+		int count = m_Reader.Read<int>();
+		if (count > 0)
+		{
+			m_Reader.ReadString(count, str);
+		}
+	}
+
+	void ReadString_v2(std::string & str)
+	{
+		int count = m_Reader.Read<int>();
+		if (count > 0)
+		{
+			BinReader::Data dat;
+			m_Reader.ReadData(count, dat);
+
+			std::wstring wstr((wchar_t*)dat.data(), count / 2);
+			Platform_Utf16To8(wstr, str);
+		}
+	}
+
+	void ReadModelInfo()
+	{
+		ReadString(ModelName);
+		ReadString(ModelNameE);
+		ReadString(Comment);
+		ReadString(CommentE);
+	}
+
+	void ReadVertexInfo()
+	{
+		int num = ReadElement_Int32(m_Reader, 4, true);
+		VertexList.resize(num);
+
+		for (std::vector<PmxVertex>::iterator it = VertexList.begin(), end = VertexList.end();
+			it != end;
+			++it)
+		{
+			it->ReadVertex(m_Reader, UVACount, BoneSize);
+		}
+	}
+
+	void ReadFaceInfo()
+	{
+		int num = ReadElement_Int32(m_Reader, 4, true);
+		FaceList.reserve(num);
+
+		for (int i = 0; i < num; ++i)
+		{
+			int fid = ReadElement_Int32(m_Reader, VertexSize, false);
+			FaceList.push_back(fid);
+		}
+	}
+
+	void ReadTextureInfo()
+	{
+		int num = ReadElement_Int32(m_Reader, 4, true);
+
+		std::string str;
+		for (int i = 0; i < num; ++i)
+		{
+			ReadString(str);
+			NameToIndex[str] = i;
+			IndexToName[i] = str;
+		}
+	}
+
+	void ReadMaterialInfo()
+	{
+		int num = ReadElement_Int32(m_Reader, 4, true);
+
+		MaterialList.resize(num);
+
+		for (std::vector<PmxMaterial>::iterator it = MaterialList.begin(), end = MaterialList.end();
+			it != end;
+			++it)
+		{
+			it->ReadMaterial(m_Reader, this);
+		}
+	}
+
+	void ReadBoneInfo()
+	{
+		int num = ReadElement_Int32(m_Reader, 4, true);
+
+		BoneList.resize(num);
+
+		for (std::vector<PmxBone>::iterator it = BoneList.begin(), end = BoneList.end();
+			it != end;
+			++it)
+		{
+			it->ReadBone(m_Reader, this);
+		}
+	}
+
+	void ReadMorphInfo()
+	{
+		int num = ReadElement_Int32(m_Reader, 4, true);
+
+		MorphList.resize(num);
+
+		for (std::vector<PmxMorph>::iterator it = MorphList.begin(), end = MorphList.end();
+			it != end;
+			++it)
+		{
+			it->ReadMorph(m_Reader, this);
+		}
+	}
+
+	void ReadNodeInfo()
+	{
+		static std::string s_Exp;
+		static bool s_tmp = Platform_Utf16To8(L"表情", s_Exp).empty();
+
+		int num = ReadElement_Int32(m_Reader, 4, true);
+
+		NodeList.resize(num);
+
+		for (int i = 0; i < num; ++i)
+		{
+			PmxNode & item = NodeList[i];
+			item.ReadNode(m_Reader, this);
+
+			if (item.SystemNode)
+			{
+				if (item.Name == "Root")
+				{
+					RootNode = i;
+				}
+				else if (item.Name == s_Exp)
+				{
+					ExpNode = i;
+				}
+			}
+		}
+	}
+
+private:
+	static int ReadElement_Int32(BinReader & reader, int bufSize, bool bSigned = true)
+	{
+		int num = 0;
+
+		BinReader::Data buffer;
+		reader.ReadData(bufSize, buffer);
+
+		switch (bufSize)
+		{
+		case 1:
+			if (!bSigned)
+			{
+				return buffer[0];
+			}
+			return (char)buffer[0];
+
+		case 2:
+			if (!bSigned)
+			{
+				return *(uint16_t*)buffer.data();
+			}
+			return *(int16_t*)buffer.data();
+
+		case 3:
+			return num;
+
+		case 4:
+			return *(int32_t*)buffer.data();
+		}
+		return num;
+	}
+
+	static std::wstring & mbs2wcs(unsigned int codePage, const std::string & strMB, std::wstring & tmpWstr)
+	{
+		int len = MultiByteToWideChar(codePage, 0, strMB.c_str(), strMB.size(), 0, 0);
+		tmpWstr.resize(len);
+		MultiByteToWideChar(codePage, 0, strMB.c_str(), strMB.size(), &tmpWstr[0], len);
+		return tmpWstr;
+	}
+
+	static std::string & wcs2mbs(unsigned int codePage, const std::wstring & strWCS, std::string & tmpStr)
+	{
+		int len = WideCharToMultiByte(codePage, 0, strWCS.c_str(), strWCS.size(), 0, 0, 0, 0);
+		tmpStr.resize(len);
+		WideCharToMultiByte(codePage, 0, strWCS.c_str(), strWCS.size(), &tmpStr[0], len, 0, 0);
+		return tmpStr;
+	}
+
+	std::wstring & Platform_Utf8To16(const std::string & strMB, std::wstring & tmpWstr)
+	{
+		return mbs2wcs(CP_UTF8, strMB, tmpWstr);
+	}
+
+	std::string & Platform_Utf16To8(const std::wstring & strWCS, std::string & tmpStr)
+	{
+		return wcs2mbs(CP_UTF8, strWCS, tmpStr);
+	}
+
+private:
+	BinReader	m_Reader;
+
+	struct StringEncType
+	{
+		enum Type
+		{
+			UTF16,
+			UTF8
+		};
+	};
+
+	float			Ver;
+	int				VertexSize;
+	int				BoneSize;
+	int				MorphSize;
+	int				MaterialSize;
+	int				BodySize;
+	int				TexSize;
+	int				UVACount;
+	StringEncType::Type	StringEnc;
+
+	std::string		ModelName, ModelNameE, Comment, CommentE;
+
+	std::vector<PmxVertex>	VertexList;
+	std::vector<int>		FaceList;
+
+	std::unordered_map<std::string, int>	NameToIndex;
+	std::map<int, std::string>				IndexToName;
+
+	std::vector<PmxMaterial>				MaterialList;
+	std::vector<PmxBone>					BoneList;
+	std::vector<PmxMorph>					MorphList;
+	std::vector<PmxNode>					NodeList;
+
+	int	RootNode, ExpNode;
+};
+
+#endif

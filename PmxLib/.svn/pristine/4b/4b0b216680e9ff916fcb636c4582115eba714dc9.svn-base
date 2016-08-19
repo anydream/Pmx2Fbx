@@ -1,0 +1,38 @@
+
+#include <stdio.h>
+#include <windows.h>
+#include "PmxReader.h"
+
+void * ReadFile(const wchar_t * strFileName, size_t & szFileLen)
+{
+	void * pResult = 0;
+	FILE * fp = 0;
+	_wfopen_s(&fp, strFileName, L"rb");
+	if (fp)
+	{
+		fseek(fp, 0, SEEK_END);
+		szFileLen = ftell(fp);
+		fseek(fp, 0, SEEK_SET);
+
+		pResult = malloc(szFileLen);
+		fread(pResult, szFileLen, 1, fp);
+
+		fclose(fp);
+	}
+	return pResult;
+}
+
+int wmain(int argc, const wchar_t ** argv)
+{
+	if (argc == 2)
+	{
+		size_t flen = 0;
+		void * pBuf = ReadFile(argv[1], flen);
+		if (pBuf)
+		{
+			PmxReader reader(pBuf, flen);
+			free(pBuf);
+		}
+	}
+	return 0;
+}
